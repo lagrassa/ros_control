@@ -61,14 +61,32 @@ ControllerManager::ControllerManager(hardware_interface::RobotHW *robot_hw, cons
   srv_reload_libraries_ = cm_node_.advertiseService("reload_controller_libraries", &ControllerManager::reloadControllerLibrariesSrv, this);
 }
 
-
-// Must be realtime safe.
-void ControllerManager::update(const ros::Time& time, const ros::Duration& period, bool reset_controllers)
+void ControllerManager::shutdownServices()
 {
+	srv_list_controllers_.shutdown();
+        srv_list_controller_types_.shutdown();
+	srv_load_controller_.shutdown();
+	srv_unload_controller_.shutdown();
+	srv_switch_controller_.shutdown();
+	srv_reload_libraries_.shutdown();
+}
+void ControllerManager::setRobotHW(hardware_interface::RobotHW *robot_hw)
+{
+  robot_hw_mutex.lock();
+  ROS_INFO("Resetting HW interface in ControllerManager");
+  robot_hw_ = robot_hw;
+  robot_hw_mutex.unlock();
+}
+// Must be realtime safe.
+void ControllerManager::update(const ros::Time& time, const ros::Duration& period, bool reset_controllers, bool run)
+{
+  //ROS_INFO("update lock");
+  //robot_hw_mutex.lock();
+  //ROS_INFO("update got lock rest controllers? ");
   used_by_realtime_ = current_controllers_list_;
   
   // Restart all running controllers if motors are re-enabled
-  if (reset_controllers){
+  if (reset_controllers  && run){
     for (const auto& controller : controllers_lists_[used_by_realtime_]){
       if (controller.c->isRunning()){
         controller.c->stopRequest(time);
@@ -76,17 +94,19 @@ void ControllerManager::update(const ros::Time& time, const ros::Duration& perio
       }
     }
   }
-
-
   // Update all controllers
+  if (run) {
   for (const auto& controller : controllers_lists_[used_by_realtime_])
     controller.c->updateRequest(time, period);
+  }
 
   // there are controllers to start/stop
   if (switch_params_.do_switch)
   {
     manageSwitch(time);
   }
+  //robot_hw_mutex.unlock();
+  //ROS_INFO("update got release block");
 }
 
 controller_interface::ControllerBase* ControllerManager::getControllerByName(const std::string& name)
@@ -117,7 +137,12 @@ void ControllerManager::manageSwitch(const ros::Time& time)
   // switch hardware interfaces (if any)
   if (!switch_params_.started)
   {
+    ROS_INFO("wait for lock on doSwitch");
+    robot_hw_mutex.lock();
+    ROS_INFO("acuired lock on doSwitch");
     robot_hw_->doSwitch(switch_start_list_, switch_stop_list_);
+    robot_hw_mutex.unlock();
+    ROS_INFO("released lock on doSwitch");
     switch_params_.started = true;
   }
 
@@ -150,6 +175,9 @@ void ControllerManager::stopControllers(const ros::Time& time)
 void ControllerManager::startControllers(const ros::Time& time)
 {
   // start controllers
+  ROS_INFO("Start controllers lock");
+  robot_hw_mutex.lock();
+  ROS_INFO("Sstart controllers lock acq");
   if (robot_hw_->switchResult() == hardware_interface::RobotHW::DONE)
   {
     for (const auto& request : start_request_)
@@ -179,10 +207,13 @@ void ControllerManager::startControllers(const ros::Time& time)
       request->waitRequest(time);
     }
   }
+  ROS_INFO("Start controllers release lock");
+  robot_hw_mutex.unlock();
 }
 
 void ControllerManager::startControllersAsap(const ros::Time& time)
 {
+  ROS_INFO("Start controllers ASAP");
   // start controllers if possible
   for (const auto& request : start_request_)
   {
@@ -226,7 +257,7 @@ void ControllerManager::startControllersAsap(const ros::Time& time)
   }
 }
 
-bool ControllerManager::loadController(const std::string& name)
+bool ControllerManager::loadController(const std::string& name, bool wait_for_realtime)
 {
   ROS_DEBUG("Will load controller '%s'", name.c_str());
 
@@ -235,7 +266,7 @@ bool ControllerManager::loadController(const std::string& name)
 
   // get reference to controller list
   int free_controllers_list = (current_controllers_list_ + 1) % 2;
-  while (ros::ok() && free_controllers_list == used_by_realtime_)
+  while (wait_for_realtime && ros::ok() && free_controllers_list == used_by_realtime_)
   {
     if (!ros::ok())
     {
@@ -349,7 +380,7 @@ bool ControllerManager::loadController(const std::string& name)
   // Destroys the old controllers list when the realtime thread is finished with it.
   int former_current_controllers_list_ = current_controllers_list_;
   current_controllers_list_ = free_controllers_list;
-  while (ros::ok() && used_by_realtime_ == former_current_controllers_list_)
+  while (wait_for_realtime &&  ros::ok() && used_by_realtime_ == former_current_controllers_list_)
   {
     if (!ros::ok())
     {
@@ -364,16 +395,16 @@ bool ControllerManager::loadController(const std::string& name)
 }
 
 
-bool ControllerManager::unloadController(const std::string &name)
+bool ControllerManager::unloadController(const std::string &name, bool wait_for_realtime)
 {
-  ROS_DEBUG("Will unload controller '%s'", name.c_str());
+  ROS_INFO("Will unload controller '%s'", name.c_str());
 
   // lock the controllers
   std::lock_guard<std::recursive_mutex> guard(controllers_lock_);
 
   // get reference to controller list
   int free_controllers_list = (current_controllers_list_ + 1) % 2;
-  while (ros::ok() && free_controllers_list == used_by_realtime_)
+  while (wait_for_realtime && ros::ok() && free_controllers_list == used_by_realtime_)
   {
     if (!ros::ok())
     {
@@ -416,7 +447,7 @@ bool ControllerManager::unloadController(const std::string &name)
   ROS_DEBUG("Realtime switches over to new controller list");
   int former_current_controllers_list_ = current_controllers_list_;
   current_controllers_list_ = free_controllers_list;
-  while (ros::ok() && used_by_realtime_ == former_current_controllers_list_)
+  while (wait_for_realtime && ros::ok() && used_by_realtime_ == former_current_controllers_list_)
   {
     if (!ros::ok())
     {
@@ -578,7 +609,11 @@ bool ControllerManager::switchController(const std::vector<std::string>& start_c
       info_list.push_back(info);
   }
 
+  ROS_INFO("before check for conflict");
+  robot_hw_mutex.lock();
+  ROS_INFO("got lock for check for conflict");
   bool in_conflict = robot_hw_->checkForConflict(info_list);
+  robot_hw_mutex.unlock();
   if (in_conflict)
   {
     ROS_ERROR("Could not switch controllers, due to resource conflict");
@@ -604,6 +639,7 @@ bool ControllerManager::switchController(const std::vector<std::string>& start_c
 
   // wait until switch is finished
   ROS_DEBUG("Request atomic controller switch from realtime loop");
+  ROS_INFO("Before switch loop");
   while (ros::ok() && switch_params_.do_switch)
   {
     if (!ros::ok())
@@ -611,11 +647,13 @@ bool ControllerManager::switchController(const std::vector<std::string>& start_c
       return false;
     }
     std::this_thread::sleep_for(std::chrono::microseconds(100));
+    auto fake_dur = ros::Duration(0.1);
+    update(switch_params_.init_time, fake_dur, false, false);
   }
   start_request_.clear();
   stop_request_.clear();
 
-  ROS_DEBUG("Successfully switched controllers");
+  ROS_INFO("Successfully switched controllers");
   return true;
 }
 
@@ -804,14 +842,14 @@ bool ControllerManager::switchControllerSrv(
   controller_manager_msgs::SwitchController::Response &resp)
 {
   // lock services
-  ROS_DEBUG("switching service called");
+  ROS_INFO("switching service called");
   std::lock_guard<std::mutex> guard(services_lock_);
-  ROS_DEBUG("switching service locked");
+  ROS_INFO("switching service locked");
 
   resp.ok = switchController(req.start_controllers, req.stop_controllers, req.strictness,
                              req.start_asap, req.timeout);
 
-  ROS_DEBUG("switching service finished");
+  ROS_INFO("switching service finished");
   return true;
 }
 

@@ -89,7 +89,7 @@ public:
    * \param reset_controllers If \c true, stop and start all running
    * controllers before updating
    */
-  void update(const ros::Time& time, const ros::Duration& period, bool reset_controllers=false);
+  void update(const ros::Time& time, const ros::Duration& period, bool reset_controllers=false, bool run=true);
   /*\}*/
 
   /** \name Non Real-Time Safe Functions
@@ -117,14 +117,15 @@ public:
    * \returns True on success
    * \returns False on failure
    */
-  bool loadController(const std::string& name);
+  bool loadController(const std::string& name, bool wait_for_realtime=false);
 
   /** \brief Unload a controller by name
    *
    * \param name The name of the controller to unload. (The same as the one used in \ref loadController )
    *
    */
-  bool unloadController(const std::string &name);
+  bool unloadController(const std::string &name, bool wait_for_realtime=false);
+  void shutdownServices();
 
   /** \brief Switch multiple controllers simultaneously.
    *
@@ -167,17 +168,21 @@ public:
    */
   void registerControllerLoader(ControllerLoaderInterfaceSharedPtr controller_loader);
   /*\}*/
+  void setRobotHW(hardware_interface::RobotHW *robot_hw);
+  void startControllers(const ros::Time& time);
+  void stopControllers(const ros::Time& time);
+  bool reloadControllerLibrariesSrv(controller_manager_msgs::ReloadControllerLibraries::Request &req,
+                                    controller_manager_msgs::ReloadControllerLibraries::Response &resp);
 
 
 private:
   void getControllerNames(std::vector<std::string> &v);
 
   void manageSwitch(const ros::Time& time);
-  void stopControllers(const ros::Time& time);
-  void startControllers(const ros::Time& time);
   void startControllersAsap(const ros::Time& time);
 
   hardware_interface::RobotHW* robot_hw_;
+  std::mutex robot_hw_mutex;
 
   ros::NodeHandle root_nh_, cm_node_;
 
@@ -231,8 +236,6 @@ private:
                           controller_manager_msgs::LoadController::Response &resp);
   bool unloadControllerSrv(controller_manager_msgs::UnloadController::Request &req,
                          controller_manager_msgs::UnloadController::Response &resp);
-  bool reloadControllerLibrariesSrv(controller_manager_msgs::ReloadControllerLibraries::Request &req,
-                                    controller_manager_msgs::ReloadControllerLibraries::Response &resp);
   std::mutex services_lock_;
   ros::ServiceServer srv_list_controllers_, srv_list_controller_types_, srv_load_controller_;
   ros::ServiceServer srv_unload_controller_, srv_switch_controller_, srv_reload_libraries_;
